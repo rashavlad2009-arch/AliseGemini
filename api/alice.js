@@ -26,7 +26,7 @@ export default async function handler(req, res) {
 
     // Отправляем запрос пользователя в Gemini
     const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
+      model: 'gemini-1.5-flash-8b',
       contents: prompt,
     });
 
