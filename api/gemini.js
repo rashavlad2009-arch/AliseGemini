@@ -34,26 +34,8 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Пустой запрос" });
     }
 
-    // 1. Автоматически запрашиваем у Google список моделей, доступных ИМЕННО вашему ключу
-    const listRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
-    const listData = await listRes.json();
-
-    let targetModel = "gemini-2.5-flash"; // запасной вариант по умолчанию
-
-    if (listRes.ok && Array.isArray(listData.models)) {
-      // Ищем первую попавшуюся модель, которая умеет генерировать текст
-      const validModel = listData.models.find(m =>
-        m.supportedGenerationMethods?.includes("generateContent") &&
-        m.name.includes("gemini") &&
-        !m.name.includes("embedding")
-      );
-      if (validModel) {
-        targetModel = validModel.name.replace(/^models\//, "");
-      }
-    }
-
-    // 2. Делаем запрос к реально доступной модели
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${targetModel}:generateContent?key=${apiKey}`;
+    // Используем актуальную модель, которую требует Google
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
 
     const response = await fetch(url, {
       method: "POST",
