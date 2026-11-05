@@ -1,73 +1,202 @@
-import { GoogleGenAI } from '@google/genai';
+let cachedModel = null;
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+const FALLBACK_MODELS = [
+  "gemini-2.5-flash",
+  "gemini-2.5-flash-lite",
+  "gemini-2.0-flash",
+  "gemini-1.5-flash"
+];
 
-export default async function handler(req, res) {
-  // Алиса всегда отправляет POST-запросы
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
+async function callGeminiModel(modelName, prompt, apiKey, signal) {
+  const cleanModel = modelName.replace(/^models\//, "");
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModel}:generateContent?key=${apiKey}`;
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    signal,
+    body: JSON.stringify({
+      contents: [
+        {
+          parts: [
+            {
+              text: `Отвечай кратко, по делу, на русском языке, без списков и спецсимволов (до 3-4 предложений). Вопрос: ${prompt}`
+            }
+          ]
+        }
+      ]
+    })
+  });
+
+  const data = await response.json();
+  return { status: response.status, ok: response.ok, data };
+}
+
+async function askGeminiForAlice(prompt, apiKey, signal) {
+  const queue = cachedModel
+    ? [cachedModel, ...FALLBACK_MODELS.filter(m => m !== cachedModel)]
+    : [...FALLBACK_MODELS];
+
+  const tried = new Set();
+
+  while (queue.length > 0) {
+    const model = queue.shift().replace(/^models\//, "");
+    if (tried.has(model)) continue;
+    tried.add(model);
+
+    const { status, ok, data } = await callGeminiModel(model, prompt, apiKey, signal);
+
+    if (ok) {
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (text) {
+        cachedModel = model;
+        return text;
+      }
+    }
+
+    const errMsg = data?.error?.message || "";
+    const suggestedMatch = errMsg.match(/models\/([a-zA-Z0-9._-]+)/);
+    if (suggestedMatch && suggestedMatch[1] && !tried.has(suggestedMatch[1])) {
+      queue.unshift(suggestedMatch[1]);
+      continue;
+    }
+
+    if (status === 404 || status === 503 || status === 429 || status === 400) {
+      continue;
+    }
   }
 
-  const { request, version } = req.body || {};
+  const listRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`, { signal });
+  const listData = await listRes.json();
 
-  try {
-    // Извлекаем команду пользователя
-    const prompt = request?.command || request?.original_utterance || '';
+  if (listRes.ok && Array.isArray(listData.models)) {
+    const dynamicModels = listData.models
+      .filter(m =>
+        m.supportedGenerationMethods?.includes("generateContent") &&
+        m.name.includes("gemini") &&
+        !m.name.includes("embedding") &&
+        !m.name.includes("imagen") &&
+        !m.name.includes("tts")
+      )
+      .map(m => m.name.replace(/^models\//, ""))
+      .filter(m => !tried.has(m))
+      .sort((a, b) => (b.includes("flash") ? 1 : 0) - (a.includes("flash") ? 1 : 0));
 
-    // Если пользователь только запустил навык
-    if (!prompt) {
-      return res.status(200).json({
-        response: {
-          text: 'Привет! Я на связи с нейросетью Gemini. Что вы хотите узнать?',
-          end_session: false
-        },
-        version: version || '1.0'
-      });
+    for (const model of dynamicModels) {
+      const { ok, data } = await callGeminiModel(model, prompt, apiKey, signal);
+      if (ok) {
+        const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (text) {
+          cachedModel = model;
+          return text;
+        }
+      }
     }
+  }
 
-    // Команда выхода из навыка
-    if (/^(выход|стоп|хватит|пока)$/i.test(prompt.trim())) {
-      return res.status(200).json({
-        response: {
-          text: 'До встречи! Обращайтесь еще.',
-          end_session: true
-        },
-        version: version || '1.0'
-      });
-    }
+  return "Серверы нейросети сейчас перегружены. Повторите вопрос через пару секунд.";
+}
 
-    // Отправляем запрос в актуальную быструю модель
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: prompt,
-      config: {
-        systemInstruction: 'Ты голосовой помощник внутри Яндекс Алисы. Отвечай кратко, по делу, максимум в 2-3 предложениях. Не используй Markdown-разметку, списки и спецсимволы — только чистый текст для озвучки.',
-        maxOutputTokens: 250,
-        temperature: 0.7,
+function cleanTextForAlice(text) {
+  return text
+    .replace(/[*#_`~>]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 1000);
+}
+
+export default async function handler(req, res) {
+  if (req.method !== "POST") {
+    return res.status(200).send("OK");
+  }
+
+  const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
+  const { request, session, version = "1.0" } = body;
+
+  const command = request?.command?.trim() || "";
+  const originalUtterance = request?.original_utterance?.trim() || command;
+
+  // Техническая проверка навыка Яндексом
+  if (command.toLowerCase() === "ping") {
+    return res.status(200).json({
+      version,
+      session,
+      response: { text: "pong", end_session: false }
+    });
+  }
+
+  // Приветствие при запуске навыка
+  if (session?.new && !originalUtterance) {
+    return res.status(200).json({
+      version,
+      session,
+      response: {
+        text: "Привет! Я подключена к Gemini. О чём хотите спросить?",
+        tts: "Привет! Я подключена к Джем+ини. О чём хотите спросить?",
+        end_session: false
       }
     });
+  }
 
-    // Очищаем текст от случайных символов разметки и обрезаем под лимит Алисы (1024 символа)
-    const cleanText = (response.text || 'Не удалось получить ответ.')
-      .replace(/[*#_~`>]/g, '')
-      .slice(0, 1000);
-
+  // Команда выхода
+  if (["хватит", "стоп", "выход", "закончить"].includes(command.toLowerCase())) {
     return res.status(200).json({
+      version,
+      session,
       response: {
-        text: cleanText,
-        end_session: false
-      },
-      version: version || '1.0'
+        text: "До встречи! Обращайтесь ещё.",
+        end_session: true
+      }
     });
+  }
 
-  } catch (error) {
-    console.error('Gemini API Error:', error);
+  const apiKey =
+    process.env.GEMINI_API_KEY ||
+    process.env.GOOGLE_API_KEY ||
+    process.env.API_KEY;
+
+  if (!apiKey) {
     return res.status(200).json({
+      version,
+      session,
       response: {
-        text: 'Произошла ошибка при обращении к нейросети. Попробуйте спросить еще раз.',
+        text: "Не настроен ключ API в переменных окружения Vercel.",
         end_session: false
-      },
-      version: version || '1.0'
+      }
+    });
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3800);
+
+  try {
+    const rawAnswer = await askGeminiForAlice(originalUtterance, apiKey, controller.signal);
+    clearTimeout(timeout);
+
+    const cleanAnswer = cleanTextForAlice(rawAnswer) || "Не удалось сформулировать ответ.";
+
+    return res.status(200).json({
+      version,
+      session,
+      response: {
+        text: cleanAnswer,
+        tts: cleanAnswer,
+        end_session: false
+      }
+    });
+  } catch (error) {
+    clearTimeout(timeout);
+    const isTimeout = error.name === "AbortError";
+
+    return res.status(200).json({
+      version,
+      session,
+      response: {
+        text: isTimeout
+          ? "Нейросеть задумалась слишком надолго. Попробуйте спросить короче."
+          : "Произошла ошибка при обращении к нейросети. Попробуйте ещё раз.",
+        end_session: false
+      }
     });
   }
 }
