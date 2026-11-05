@@ -1,7 +1,6 @@
 function cleanTextForAlice(text) {
   return text
     .replace(/[*#_`~>]/g, "")
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1") // убирает markdown-ссылки
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 1000);
@@ -12,18 +11,12 @@ export default async function handler(req, res) {
     return res.status(200).send("OK");
   }
 
-  let body = {};
-  try {
-    body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
-  } catch (e) {
-    body = {};
-  }
-
+  const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
   const { request, session, version = "1.0" } = body;
+
   const command = request?.command?.trim() || "";
   const originalUtterance = request?.original_utterance?.trim() || command;
 
-  // Техническая проверка навыка Яндексом
   if (command.toLowerCase() === "ping") {
     return res.status(200).json({
       version,
@@ -32,42 +25,48 @@ export default async function handler(req, res) {
     });
   }
 
-  // Приветствие при запуске навыка
   if (session?.new && !originalUtterance) {
     return res.status(200).json({
       version,
       session,
       response: {
         text: "Привет! Я подключена к нейросети Grok. О чём хотите спросить?",
-        tts: "Привет! Я подключена к нейросети Грок. О чём хотите спросить?",
         end_session: false
       }
     });
   }
 
-  // Команда выхода
-  if (["хватит", "стоп", "выход", "закончить", "пока"].includes(command.toLowerCase())) {
+  if (["хватит", "стоп", "выход", "закончить"].includes(command.toLowerCase())) {
     return res.status(200).json({
       version,
       session,
-      response: { text: "До встречи! Обращайтесь ещё.", end_session: true }
+      response: {
+        text: "До встречи! Обращайтесь ещё.",
+        end_session: true
+      }
     });
   }
 
-  // Подхватывает ключ из любой из этих переменных в Vercel
-  const apiKey = process.env.XAI_API_KEY || process.env.GROK_API_KEY || process.env.GEMINI_API_KEY || process.env.API_KEY;
+  const rawKey =
+    process.env.XAI_API_KEY ||
+    process.env.GROK_API_KEY ||
+    process.env.GEMINI_API_KEY ||
+    process.env.API_KEY ||
+    "";
+
+  const apiKey = rawKey.trim().replace(/^["']|["']$/g, "");
+
   if (!apiKey) {
     return res.status(200).json({
       version,
       session,
       response: {
-        text: "Не найден ключ API в настройках Vercel.",
+        text: "Не настроен ключ API в переменных окружения Vercel.",
         end_session: false
       }
     });
   }
 
-  // Таймаут 3.8 секунды, чтобы Алиса не оборвала соединение сама
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 3800);
 
@@ -76,23 +75,18 @@ export default async function handler(req, res) {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey.trim()}`
+        "Authorization": `Bearer ${apiKey}`
       },
       signal: controller.signal,
       body: JSON.stringify({
-        model: "grok-2-latest", // при необходимости можно заменить на "grok-3-mini-fast" или "grok-beta"
+        model: "grok-2-latest",
         messages: [
           {
             role: "system",
-            content: "Ты голосовой помощник внутри Яндекс Алисы. Отвечай кратко, по делу, на русском языке, максимум 2-3 предложения. Не используй списки, жирный шрифт и спецсимволы — только чистый текст для озвучки голосом."
+            content: "Отвечай кратко, по делу, на русском языке, без списков и спецсимволов, максимум 3 предложения."
           },
-          {
-            role: "user",
-            content: originalUtterance
-          }
+          { role: "user", content: originalUtterance }
         ],
-        max_tokens: 200,
-        temperature: 0.7,
         stream: false
       })
     });
@@ -101,19 +95,18 @@ export default async function handler(req, res) {
     const data = await response.json();
 
     if (!response.ok) {
-      const errMsg = data?.error?.message || data?.error || `Код ошибки ${response.status}`;
       return res.status(200).json({
         version,
         session,
         response: {
-          text: cleanTextForAlice(`Ошибка Grok API: ${errMsg}`),
+          text: "Ошибка ключа или лимита xAI. Проверьте настройки в Vercel.",
           end_session: false
         }
       });
     }
 
-    const rawAnswer = data?.choices?.[0]?.message?.content || "Не удалось сформулировать ответ.";
-    const cleanAnswer = cleanTextForAlice(rawAnswer);
+    const rawAnswer = data.choices?.[0]?.message?.content || "";
+    const cleanAnswer = cleanTextForAlice(rawAnswer) || "Не удалось получить ответ.";
 
     return res.status(200).json({
       version,
@@ -126,14 +119,11 @@ export default async function handler(req, res) {
     });
   } catch (error) {
     clearTimeout(timeout);
-    const isTimeout = error.name === "AbortError";
     return res.status(200).json({
       version,
       session,
       response: {
-        text: isTimeout
-          ? "Нейросеть задумалась слишком надолго. Попробуйте спросить короче."
-          : "Произошла ошибка соединения с сервером Grok.",
+        text: "Нейросеть задумалась слишком надолго. Попробуйте спросить короче.",
         end_session: false
       }
     });
