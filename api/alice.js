@@ -30,7 +30,7 @@ export default async function handler(req, res) {
       version,
       session,
       response: {
-        text: "Привет! Я подключена к нейросети Grok. О чём хотите спросить?",
+        text: "Привет! Я на связи. О чём хотите спросить?",
         end_session: false
       }
     });
@@ -48,9 +48,9 @@ export default async function handler(req, res) {
   }
 
   const rawKey =
-    process.env.XAI_API_KEY ||
-    process.env.GROK_API_KEY ||
+    process.env.GROQ_API_KEY ||
     process.env.GEMINI_API_KEY ||
+    process.env.XAI_API_KEY ||
     process.env.API_KEY ||
     "";
 
@@ -71,7 +71,7 @@ export default async function handler(req, res) {
   const timeout = setTimeout(() => controller.abort(), 3800);
 
   try {
-    const response = await fetch("https://api.x.ai/v1/chat/completions", {
+    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -79,7 +79,7 @@ export default async function handler(req, res) {
       },
       signal: controller.signal,
       body: JSON.stringify({
-        model: "grok-2-latest",
+        model: "llama-3.3-70b-versatile",
         messages: [
           {
             role: "system",
@@ -87,7 +87,8 @@ export default async function handler(req, res) {
           },
           { role: "user", content: originalUtterance }
         ],
-        stream: false
+        temperature: 0.6,
+        max_tokens: 350
       })
     });
 
@@ -99,7 +100,7 @@ export default async function handler(req, res) {
         version,
         session,
         response: {
-          text: "Ошибка ключа или лимита xAI. Проверьте настройки в Vercel.",
+          text: "Ошибка ключа или лимита Groq API. Проверьте ключ в Vercel.",
           end_session: false
         }
       });
