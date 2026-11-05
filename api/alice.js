@@ -1,5 +1,42 @@
+let cachedGroqModel = null;
+
+async function getWorkingGroqModel(apiKey, signal) {
+  if (cachedGroqModel) return cachedGroqModel;
+
+  const res = await fetch("https://api.groq.com/openai/v1/models", {
+    headers: { "Authorization": `Bearer ${apiKey}` },
+    signal
+  });
+  const data = await res.json();
+
+  if (!res.ok || !Array.isArray(data.data)) {
+    throw new Error("Не удалось получить список моделей Groq");
+  }
+
+  const chatModels = data.data
+    .map(m => m.id)
+    .filter(id =>
+      !id.includes("whisper") &&
+      !id.includes("guard") &&
+      !id.includes("tts") &&
+      !id.includes("playai") &&
+      !id.includes("embed")
+    );
+
+  const preferred = chatModels.find(id =>
+    id.includes("llama-3") ||
+    id.includes("llama-4") ||
+    id.includes("qwen") ||
+    id.includes("gemma")
+  );
+
+  cachedGroqModel = preferred || chatModels[0];
+  return cachedGroqModel;
+}
+
 function cleanTextForAlice(text) {
   return text
+    .replace(/<think>[\s\S]*?<\/think>/gi, "")
     .replace(/[*#_`~>]/g, "")
     .replace(/\s+/g, " ")
     .trim()
@@ -71,6 +108,8 @@ export default async function handler(req, res) {
   const timeout = setTimeout(() => controller.abort(), 3800);
 
   try {
+    const model = await getWorkingGroqModel(apiKey, controller.signal);
+
     const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -79,7 +118,7 @@ export default async function handler(req, res) {
       },
       signal: controller.signal,
       body: JSON.stringify({
-        model: "llama-3.3-70b-versatile",
+        model,
         messages: [
           {
             role: "system",
@@ -96,11 +135,12 @@ export default async function handler(req, res) {
     const data = await response.json();
 
     if (!response.ok) {
+      cachedGroqModel = null;
       return res.status(200).json({
         version,
         session,
         response: {
-          text: "Ошибка ключа или лимита Groq API. Проверьте ключ в Vercel.",
+          text: "Ошибка обращения к модели Groq. Попробуйте ещё раз.",
           end_session: false
         }
       });
