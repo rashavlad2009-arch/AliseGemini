@@ -1,4 +1,5 @@
 export default async function handler(req, res) {
+  // Настройка CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -11,17 +12,25 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Method Not Allowed" });
   }
 
-  const apiKey =
-    process.env.GEMINI_API_KEY ||
-    process.env.GOOGLE_API_KEY ||
-    process.env.API_KEY;
-
-  if (!apiKey) {
-    return.status(500).json({ error: "Не задан GEMINI_API_KEY в переменных окружения Vercel" });
-  }
-
   try {
-    const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
+    // Получаем ключ API
+    const apiKey =
+      process.env.GEMINI_API_KEY ||
+      process.env.GOOGLE_API_KEY ||
+      process.env.API_KEY;
+
+    if (!apiKey) {
+      return.status(500).json({ error: "Не найден API-ключ в переменных окружения Vercel (GEMINI_API_KEY)" });
+    }
+
+    // Парсим тело запроса
+    let body = {};
+    try {
+      body = typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
+    } catch (e) {
+      body = {};
+    }
+
     const prompt =
       body.prompt ||
       body.message ||
@@ -30,40 +39,49 @@ export default async function handler(req, res) {
       body.contents?.[0]?.parts?.[0]?.text ||
       "";
 
-    if (!prompt.trim()) {
-      return res.status(400).json({ error: "Пустой запрос" });
+    if (!prompt || typeof prompt !== "string" || !prompt.trim()) {
+      return.status(400).json({ error: "Пустой текстовый запрос" });
     }
 
-    // Запрос напрямую к стабильной модели
+    // Делаем прямой запрос к стабильной эндпоинт-модели Google
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
 
-    const response = await fetch(url, {
+    const apiResponse = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }]
+        contents: [
+          {
+            parts: [{ text: prompt.trim() }]
+          }
+        ]
       })
     });
 
-    const data = await response.json();
+    const data = await apiResponse.json();
 
-    if (!response.ok) {
-      const errMsg = data.error?.message || `Ошибка API, код статуса: ${response.status}`;
-      return res.status(500).json({ error: errMsg });
+    if (!apiResponse.ok) {
+      const errorMsg = data?.error?.message || `Ошибка Google API, код статуса: ${apiResponse.status}`;
+      return.status(500).json({ error: errorMsg });
     }
 
-    const answer = data.candidates?.[0]?.content?.parts?.[0]?.text || "Пустой ответ от нейросети";
+    const answer =
+      data?.candidates?.[0]?.content?.parts?.[0]?.text ||
+      "Нейросеть вернула пустой ответ.";
 
-    return res.status(200).json({
+    // Возвращаем ответ во всех возможных форматах, которые может ждать фронтенд
+    return.status(200).json({
       reply: answer,
       text: answer,
       response: answer,
       answer: answer,
       message: answer
     });
-  } catch (error) {
-    return res.status(500).json({
-      error: "Ошибка сервера: " + (error.message || "Неизвестный сбой")
+
+  } catch (err) {
+    // Безопасный перехват любой непредвиденной ошибки сервера
+    return.status(500).json({
+      error: "Сбой сервера Vercel: " + (err.message || "Неизвестная ошибка")
     });
   }
 }
