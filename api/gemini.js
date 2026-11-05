@@ -1,26 +1,5 @@
-import { GoogleGenAI } from '@google/genai';
-
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-
-// Функция для повтора запроса при временной ошибке серверов Google
-async function generateWithRetry(params, retries = 3, delay = 2000) {
-  for (let i = 0; i < retries; i++) {
-    try {
-      return await ai.models.generateContent(params);
-    } catch (error) {
-      // Если это ошибка 503 (перегрузка) и попытки еще остались — ждем и повторяем
-      if (error?.status === 503 || error?.message?.includes('503') || error?.message?.includes('overloaded')) {
-        if (i < retries - 1) {
-          await new Promise(resolve => setTimeout(resolve, delay));
-          continue;
-        }
-      }
-      throw error;
-    }
-  }
-}
-
 export default async function handler(req, res) {
+  // Настройка CORS для веб-интерфейса
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -36,7 +15,7 @@ export default async function handler(req, res) {
   try {
     let body = {};
     try {
-      body = typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
+      body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
     } catch (e) {
       body = {};
     }
@@ -46,14 +25,45 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Пустой текстовый запрос" });
     }
 
-    // Вызываем генерацию с автоповтором
-    const response = await generateWithRetry({
-      model: 'gemini-3.8-flash',
-      contents: prompt,
+    // Берем ключ из любой заданной переменной окружения в Vercel
+    const apiKey = process.env.XAI_API_KEY || process.env.GROK_API_KEY || process.env.GEMINI_API_KEY || process.env.API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({ error: "Не найден API-ключ в переменных окружения Vercel" });
+    }
+
+    const response = await fetch("https://api.x.ai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey.trim()}`
+      },
+      body: JSON.stringify({
+        model: "grok-2-latest", // можно также использовать "grok-3-mini-fast" или "grok-beta"
+        messages: [
+          {
+            role: "system",
+            content: "Ты умный и полезный ИИ-ассистент. Отвечай понятно, структурированно и на русском языке."
+          },
+          {
+            role: "user",
+            content: prompt.trim()
+          }
+        ],
+        temperature: 0.7,
+        stream: false
+      })
     });
 
-    const answer = response.text || "Нейросеть вернула пустой ответ.";
+    const data = await response.json();
 
+    if (!response.ok) {
+      const errMsg = data?.error?.message || data?.error || `Ошибка Grok API: статус ${response.status}`;
+      return res.status(response.status).json({ error: errMsg });
+    }
+
+    const answer = data?.choices?.[0]?.message?.content || "Нейросеть вернула пустой ответ.";
+
+    // Отдаем ответ во всех полях, которые может ожидать фронтенд
     return res.status(200).json({
       reply: answer,
       text: answer,
@@ -63,13 +73,9 @@ export default async function handler(req, res) {
     });
 
   } catch (error) {
-    console.error('Gemini API Error:', error);
-    const errMessage = error?.message || "Неизвестная ошибка сервера";
-    
-    if (errMessage.includes('503') || errMessage.includes('overloaded')) {
-      return res.status(503).json({ error: "Сервера Google перегружены. Попробуйте отправить сообщение еще раз через пару секунд." });
-    }
-
-    return res.status(500).json({ error: errMessage });
+    console.error("Grok API Error:", error);
+    return res.status(500).json({
+      error: "Сбой соединения с сервером Grok: " + (error?.message || "Неизвестная ошибка")
+    });
   }
 }
