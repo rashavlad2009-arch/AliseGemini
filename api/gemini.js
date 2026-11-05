@@ -34,8 +34,8 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Пустой запрос" });
     }
 
-    // Используем актуальную модель, которую требует Google
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
+    // Используем проверенную временем модель
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
 
     const response = await fetch(url, {
       method: "POST",
@@ -48,7 +48,7 @@ export default async function handler(req, res) {
     const data = await response.json();
 
     if (!response.ok) {
-      throw new Error(data.error?.message || `Ошибка API, код: ${response.status}`);
+      throw new Error(data.error?.message || `Ошибка Google API, код: ${response.status}`);
     }
 
     const answer = data.candidates?.[0]?.content?.parts?.[0]?.text || "Пустой ответ";
