@@ -1,65 +1,86 @@
 export default async function handler(req, res) {
-  // Настройка CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type"); 
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
   if (req.method === "OPTIONS") {
     return res.status(200).end();
-  } 
+  }
 
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method Not Allowed" });
-  } 
+  }
+
+  const apiKey =
+    process.env.GEMINI_API_KEY ||
+    process.env.GOOGLE_API_KEY ||
+    process.env.API_KEY;
+
+  if (!apiKey) {
+    return res.status(500).json({ error: "Не задан GEMINI_API_KEY в настройках Vercel" });
+  }
 
   try {
-    // Получаем ключ API
-    const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.API_KEY; 
-    if (!apiKey) {
-      return res.status(500).json({ error: "Не найден API-ключ в переменных окружения Vercel (GEMINI_API_KEY)" });
-    } 
+    const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
+    const prompt =
+      body.prompt ||
+      body.message ||
+      body.text ||
+      body.query ||
+      body.contents?.[0]?.parts?.[0]?.text ||
+      "";
 
-    // Парсим тело запроса
-    let body = {}; 
-    try {
-      body = typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {}); 
-    } catch (e) {
-      body = {}; 
+    if (!prompt.trim()) {
+      return res.status(400).json({ error: "Пустой запрос" });
     }
 
-    const prompt = body.prompt || body.message || body.text || body.query || ""; 
-    if (!prompt || typeof prompt !== "string" || !prompt.trim()) {
-      return res.status(400).json({ error: "Пустой текстовый запрос" });
-    } 
+    // 1. Автоматически запрашиваем у Google список моделей, доступных ИМЕННО вашему ключу
+    const listRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
+    const listData = await listRes.json();
 
-    // Делаем прямой запрос к стабильной эндпоинт-модели Google
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`; 
-    const apiResponse = await fetch(url, {
-      method: "POST", 
-      headers: { "Content-Type": "application/json" }, 
+    let targetModel = "gemini-2.5-flash"; // запасной вариант по умолчанию
+
+    if (listRes.ok && Array.isArray(listData.models)) {
+      // Ищем первую попавшуюся модель, которая умеет генерировать текст
+      const validModel = listData.models.find(m =>
+        m.supportedGenerationMethods?.includes("generateContent") &&
+        m.name.includes("gemini") &&
+        !m.name.includes("embedding")
+      );
+      if (validModel) {
+        targetModel = validModel.name.replace(/^models\//, "");
+      }
+    }
+
+    // 2. Делаем запрос к реально доступной модели
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${targetModel}:generateContent?key=${apiKey}`;
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt.trim() }] }] 
-      }) 
-    }); 
+        contents: [{ parts: [{ text: prompt }] }]
+      })
+    });
 
-    const data = await apiResponse.json(); 
-    if (!apiResponse.ok) {
-      const errorMsg = data?.error?.message || `Ошибка Google API, код статуса: ${apiResponse.status}`; 
-      return res.status(500).json({ error: errorMsg }); 
-    } 
+    const data = await response.json();
 
-    const answer = data?.candidates?.[0]?.content?.parts?.[0]?.text || "Нейросеть вернула пустой ответ."; 
+    if (!response.ok) {
+      throw new Error(data.error?.message || `Ошибка API, код: ${response.status}`);
+    }
 
-    // Возвращаем ответ во всех возможных форматах для фронтенда
+    const answer = data.candidates?.[0]?.content?.parts?.[0]?.text || "Пустой ответ";
+
     return res.status(200).json({
-      reply: answer, 
-      text: answer, 
-      response: answer, 
-      answer: answer, 
-      message: answer 
-    }); 
-
-  } catch (err) {
-    return res.status(500).json({ error: "Сбой сервера Vercel: " + (err.message || "Неизвестная ошибка") }); 
+      reply: answer,
+      text: answer,
+      response: answer,
+      answer: answer,
+      message: answer
+    });
+  } catch (error) {
+    return res.status(500).json({
+      error: error.message || "Внутренняя ошибка сервера"
+    });
   }
 }
